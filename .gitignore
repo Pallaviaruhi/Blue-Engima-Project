@@ -1,0 +1,11 @@
+# Ignore Python virtual environment
+venv/
+.env/
+.venv/
+
+# Ignore Python cache files
+_pycache_/
+*.pyc
+
+# IGNORE YOUR SECRET KEYS
+config.py
