@@ -5,6 +5,12 @@ from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 from neo4j import GraphDatabase
 import config
+import asyncio
+
+
+# Added a dictionary to store embeddings as Cache
+embedding_cache = {}
+
 
 # -----------------------------
 # Config
@@ -22,13 +28,14 @@ client = OpenAI(api_key=config.OPENAI_API_KEY)
 pc = Pinecone(api_key=config.PINECONE_API_KEY)
 
 # Connect to Pinecone index
-if INDEX_NAME not in pc.list_indexes().names():
+existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
+if INDEX_NAME not in existing_indexes:
     print(f"Creating managed index: {INDEX_NAME}")
     pc.create_index(
         name=INDEX_NAME,
         dimension=config.PINECONE_VECTOR_DIM,
         metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east1-gcp")
+        spec=ServerlessSpec(cloud="aws", region="us-east-1") # Note: Changed region to match pinecone region
     )
 
 index = pc.Index(INDEX_NAME)
@@ -41,10 +48,18 @@ driver = GraphDatabase.driver(
 # -----------------------------
 # Helper functions
 # -----------------------------
+# This is NEW function with caching
 def embed_text(text: str) -> List[float]:
-    """Get embedding for a text string."""
+    """Get embedding for a text string, using a cache."""
+    if text in embedding_cache:
+        print("DEBUG: Cache hit!")
+        return embedding_cache[text]
+
+    print("DEBUG: Cache miss. Calling API.")
     resp = client.embeddings.create(model=EMBED_MODEL, input=[text])
-    return resp.data[0].embedding
+    embedding = resp.data[0].embedding
+    embedding_cache[text] = embedding # Store embedding in the cache
+    return embedding
 
 def pinecone_query(query_text: str, top_k=TOP_K):
     """Query Pinecone index using embedding."""
@@ -56,8 +71,8 @@ def pinecone_query(query_text: str, top_k=TOP_K):
         include_values=False
     )
     print("DEBUG: Pinecone top 5 results:")
-    print(len(res["matches"]))
-    return res["matches"]
+    print(len(res.matches))
+    return res.matches
 
 def fetch_graph_context(node_ids: List[str], neighborhood_depth=1):
     """Fetch neighboring nodes from Neo4j."""
@@ -87,16 +102,20 @@ def fetch_graph_context(node_ids: List[str], neighborhood_depth=1):
 def build_prompt(user_query, pinecone_matches, graph_facts):
     """Build a chat prompt combining vector DB matches and graph facts."""
     system = (
-        "You are a helpful travel assistant. Use the provided semantic search results "
-        "and graph facts to answer the user's query briefly and concisely. "
-        "Cite node ids when referencing specific places or attractions."
-    )
+    "You are a world-class travel expert specializing in creating personalized and engaging itineraries for Vietnam. "
+    "Your tone is enthusiastic and helpful. "
+    "Use the provided 'semantic matches' as the primary inspiration for locations and the 'graph facts' to find connections and nearby activities. "
+    "Your primary goal is to create a logical, day-by-day itinerary based ONLY on the provided context. "
+    "For each suggested activity, ALWAYS cite its node ID like this: (id: attraction_123). "
+    "Do not invent places or activities not mentioned in the context. "
+    "Conclude your answer with a friendly closing remark."
+)
 
     vec_context = []
     for m in pinecone_matches:
-        meta = m["metadata"]
-        score = m.get("score", None)
-        snippet = f"- id: {m['id']}, name: {meta.get('name','')}, type: {meta.get('type','')}, score: {score}"
+        meta = m.metadata           # Used dot notation
+        score = m.score             
+        snippet = f"- id: {m.id}, name: {meta.get('name','')}, type: {meta.get('type','')}, score: {score}" # Use m.id
         if meta.get("city"):
             snippet += f", city: {meta.get('city')}"
         vec_context.append(snippet)
@@ -126,24 +145,42 @@ def call_chat(prompt_messages):
     )
     return resp.choices[0].message.content
 
+
 # -----------------------------
-# Interactive chat
+# Interactive chat (Asynchronous Version)
 # -----------------------------
-def interactive_chat():
+async def process_query(query: str):
+    """Asynchronously processes a single user query."""
+
+    # Step 1: Get Pinecone matches (this is I/O bound, run in a thread)
+    matches = await asyncio.to_thread(pinecone_query, query, top_k=TOP_K)
+
+    # Step 2: Get graph context (this is I/O bound, run in a thread)
+    match_ids = [m.id for m in matches]
+    graph_facts = await asyncio.to_thread(fetch_graph_context, match_ids)
+
+    # Step 3: Build the prompt (this is CPU bound, can run normally)
+    prompt = build_prompt(query, matches, graph_facts)
+
+    # Step 4: Call the Chat model (this is I/O bound, run in a thread)
+    answer = await asyncio.to_thread(call_chat, prompt)
+
+    print("\n=== Assistant Answer ===\n")
+    print(answer)
+    print("\n=== End ===\n")
+
+
+async def interactive_chat():
+    """Main async chat loop."""
     print("Hybrid travel assistant. Type 'exit' to quit.")
     while True:
-        query = input("\nEnter your travel question: ").strip()
-        if not query or query.lower() in ("exit","quit"):
+        query = await asyncio.to_thread(input, "\nEnter your travel question: ")
+        query = query.strip()
+
+        if not query or query.lower() in ("exit", "quit"):
             break
 
-        matches = pinecone_query(query, top_k=TOP_K)
-        match_ids = [m["id"] for m in matches]
-        graph_facts = fetch_graph_context(match_ids)
-        prompt = build_prompt(query, matches, graph_facts)
-        answer = call_chat(prompt)
-        print("\n=== Assistant Answer ===\n")
-        print(answer)
-        print("\n=== End ===\n")
+        await process_query(query)
 
 if __name__ == "__main__":
-    interactive_chat()
+    asyncio.run(interactive_chat())
