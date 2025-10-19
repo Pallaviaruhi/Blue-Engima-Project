@@ -9,3 +9,4 @@ _pycache_/
 
 # IGNORE YOUR SECRET KEYS
 config.py
+.env
