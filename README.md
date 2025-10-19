@@ -1,6 +1,4 @@
-Here is the full `README.md` content with the "Example Interaction" sections correctly formatted as code blocks for you to copy and paste.
 
-````markdown
 # Hybrid AI Travel Assistant 🇻🇳
 
 This project is an advanced Retrieval-Augmented Generation (RAG) system designed to answer travel queries about Vietnam. It leverages a hybrid data retrieval approach, combining the strengths of semantic vector search with a structured knowledge graph to provide contextually rich, accurate, and engaging answers.
@@ -173,5 +171,4 @@ Start your romantic journey in Da Lat...
 === End ===
 ```
 
-```
 ```
